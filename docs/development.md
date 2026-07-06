@@ -50,6 +50,8 @@ After any change, verify:
 - [ ] `--language` forces the expected language
 - [ ] `--device cpu` works on any machine
 - [ ] `--output` writes to the specified path
+- [ ] `--threads 4` overrides CPU thread count
+- [ ] `--temperature 0.2` produces output (non-deterministic)
 - [ ] Script ends with `>>> SCRIPT FINISHED <<<`
 
 ## Adding a new model size
@@ -67,6 +69,7 @@ Whisper supports `tiny`, `base`, `small`, `medium`, `large`. To add a new model 
 
 ## Known quirks
 
-- `torch.set_num_threads(1)` is called before every model load. Keep this if the model is loaded in the same process.
+- `torch.set_num_threads()` is only called when `--threads` is passed. By default, PyTorch auto-detects thread count.
 - `verbose=False` on `model.transcribe()` suppresses Whisper's own logging. If debugging, temporarily set to `True`.
 - The `format_transcript()` function expects Whisper's segment format (`result["segments"]` with `start`, `end`, `text` keys). If upgrading Whisper, verify the result schema.
+- `condition_on_previous_text=False` is passed to improve speed and avoid failure loops. If per-segment context consistency matters, change it to `True` in `transcribe_audio()`.

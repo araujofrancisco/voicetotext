@@ -45,13 +45,15 @@ python app.py <audio_file> [options]
 ```
 
 | Option | Default | Description |
-|---|---|---|
+|---|---|---|---|
 | `audio_file` | — | Path to audio file (required) |
 | `--model` | `small` | Model size: `tiny`, `base`, `small`, `medium`, `large` |
 | `--output` | `transcript.txt` | Output file path |
 | `--device` | auto | `cpu` or `cuda` (auto-detected from torch) |
 | `--language` | auto | Force language code, e.g. `en`, `es`, `fr` |
 | `--timestamps` | off | Prepend `[HH:MM:SS.mmm]` to each line |
+| `--threads` | auto | CPU threads for PyTorch (default: auto-detect) |
+| `--temperature` | `0.0` | Decode temperature; 0 is deterministic, higher enables fallback |
 
 ## Examples
 
@@ -67,6 +69,9 @@ python app.py meeting.m4a --model tiny --device cpu
 
 # Custom output path
 python app.py podcast.mp3 --output podcast.txt
+
+# CPU with 4 threads and deterministic decoding
+python app.py meeting.wav --model tiny --device cpu --threads 4
 ```
 
 ## How it works

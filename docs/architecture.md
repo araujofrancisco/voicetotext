@@ -2,17 +2,17 @@
 
 ## Entrypoint
 
-`app.py` — a single 135-line Python script with no package structure. The script is executable (`#!/usr/bin/env python3`) and runs via `python app.py`.
+`app.py` — a single-file Python script (~150 lines). The script is executable (`#!/usr/bin/env python3`) and runs via `python app.py`.
 
 ## Execution flow
 
 ```
-main()                           # app.py:98
-  ├─ parse_arguments()           # app.py:22  — CLI arg parsing + CUDA auto-detect
-  ├─ load_whisper_model()        # app.py:62  — model download/load + memory cleanup
-  ├─ transcribe_audio()          # app.py:81  — Whisper transcribe call
-  ├─ format_transcript()         # app.py:46  — segments → lines, optional timestamps
-  ├─ save_transcript()           # app.py:90  — write to file + print preview
+main()                           # app.py:108
+  ├─ parse_arguments()           # app.py:22   — CLI arg parsing + CUDA auto-detect
+  ├─ load_whisper_model()        # app.py:66   — model download/load + memory cleanup
+  ├─ transcribe_audio()          # app.py:86   — Whisper transcribe call
+  ├─ format_transcript()         # app.py:50   — segments → lines, optional timestamps
+  ├─ save_transcript()           # app.py:100  — write to file + print preview
   └─ (exit)
 ```
 
@@ -20,39 +20,40 @@ main()                           # app.py:98
 
 ### `parse_arguments()` (line 22)
 
-Uses `argparse`. Imports `torch` conditionally to check `torch.cuda.is_available()` and set the default device string. Returns a `Namespace` with all options.
+Uses `argparse`. Imports `torch` conditionally to check `torch.cuda.is_available()` and set the default device string. Returns a `Namespace` with all options, including `--threads` (default `None` → auto-detect) and `--temperature` (default `0.0`).
 
-### `load_whisper_model()` (line 62)
+### `load_whisper_model()` (line 66)
 
-- Calls `torch.set_num_threads(1)` before loading to prevent thread contention with PyTorch's internal parallelism.
+Accepts optional `threads` parameter. If set, calls `torch.set_num_threads(threads)` before loading; otherwise PyTorch auto-detects thread count.
 - Loads the model via `whisper.load_model(model_name, device=device)`.
 - After loading, calls `gc.collect()` and `torch.cuda.empty_cache()` to reclaim memory.
 - Wraps errors: missing `openai-whisper` or `torch` raises `ImportError` with install instructions; other failures raise `RuntimeError`.
 
-### `transcribe_audio()` (line 81)
+### `transcribe_audio()` (line 86)
 
-- Calls `model.transcribe(file_path, language=language, verbose=False)`.
+Accepts `temperature` (float, default `0.0`) and `condition_on_previous_text` (bool, default `False`).
+- Calls `model.transcribe(file_path, language=language, verbose=False, temperature=temperature, condition_on_previous_text=condition_on_previous_text)`.
 - `verbose=False` suppresses Whisper's internal progress output.
 - Returns the raw Whisper result dict (keys: `text`, `segments`, `language`).
 
-### `format_transcript()` (line 46)
+### `format_transcript()` (line 50)
 
 - Iterates `result["segments"]` — each segment has `start` (float seconds), `end`, `text`.
 - Strips each segment's text and skips empty ones.
 - If `--timestamps` is set, formats `start` as `[HH:MM:SS.mmm]` via `format_time()`.
 - Joins lines with `"\n"`.
 
-### `format_time()` (line 38)
+### `format_time()` (line 42)
 
 Converts float seconds to `HH:MM:SS.mmm` string.
 
-### `save_transcript()` (line 90)
+### `save_transcript()` (line 100)
 
 - Writes formatted text to the output path (UTF-8).
-- Prints the first 5 lines to stdout as a preview preview.
+- Prints the first 5 lines to stdout as a preview.
 - On failure raises `RuntimeError`.
 
-### `main()` (line 98)
+### `main()` (line 108)
 
 - Prints `>>> SCRIPT STARTED <<<` on entry.
 - Validates the audio file exists.
@@ -68,9 +69,8 @@ Converts float seconds to `HH:MM:SS.mmm` string.
 
 ## Memory management
 
-1. `torch.set_num_threads(1)` reduces CPU thread pool size before model load.
-2. `gc.collect()` forces Python garbage collection after model load.
-3. `torch.cuda.empty_cache()` frees unused CUDA memory after model load.
+1. `gc.collect()` forces Python garbage collection after model load.
+2. `torch.cuda.empty_cache()` frees unused CUDA memory after model load.
 
 This pattern exists because Whisper models are large and memory pressure can be significant, especially on GPU.
 
