@@ -33,6 +33,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--language", type=str, default=None, help="Force language code (e.g., 'en', 'es').")
     parser.add_argument("--timestamps", action="store_true", 
                         help="Include [HH:MM:SS.mmm] timestamps at the start of each line.")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="CPU threads for PyTorch (default: auto-detect).")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Decode temperature. 0 is deterministic; higher values enable fallback attempts. (default: 0.0)")
     return parser.parse_args()
 
 def format_time(seconds: float) -> str:
@@ -59,12 +63,13 @@ def format_transcript(result: dict, include_timestamps: bool) -> str:
             
     return "\n".join(lines)
 
-def load_whisper_model(model_name: str, device: str):
+def load_whisper_model(model_name: str, device: str, threads: int | None = None):
     try:
         import torch
         import whisper
         
-        torch.set_num_threads(1)
+        if threads is not None:
+            torch.set_num_threads(threads)
         logging.info(f"Loading Whisper model '{model_name}' on {device.upper()}...")
         model = whisper.load_model(model_name, device=device)
         
@@ -78,11 +83,16 @@ def load_whisper_model(model_name: str, device: str):
     except Exception as e:
         raise RuntimeError(f"Failed to load model: {e}") from e
 
-def transcribe_audio(model, file_path: str, language: str | None = None) -> dict:
+def transcribe_audio(model, file_path: str, language: str | None = None,
+                     temperature: float = 0.0, condition_on_previous_text: bool = False) -> dict:
     try:
         logging.info(f"Starting transcription of: {os.path.basename(file_path)}")
         # verbose=False keeps Whisper's internal logging quiet; we handle our own output
-        result = model.transcribe(file_path, language=language, verbose=False)
+        result = model.transcribe(
+            file_path, language=language, verbose=False,
+            temperature=temperature,
+            condition_on_previous_text=condition_on_previous_text,
+        )
         return result
     except Exception as e:
         raise RuntimeError(f"Transcription failed: {e}") from e
@@ -105,8 +115,12 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        model = load_whisper_model(args.model, args.device)
-        raw_result = transcribe_audio(model, args.audio_file, args.language)
+        model = load_whisper_model(args.model, args.device, args.threads)
+        raw_result = transcribe_audio(
+            model, args.audio_file, args.language,
+            temperature=args.temperature,
+            condition_on_previous_text=False,
+        )
         
         # Format the output based on the --timestamps flag
         formatted_transcript = format_transcript(raw_result, args.timestamps)

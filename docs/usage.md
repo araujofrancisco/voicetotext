@@ -70,11 +70,39 @@ CPU transcription is slower but uses less RAM. CUDA transcription requires an NV
 python app.py recording.mp3 --output custom_output.txt
 ```
 
+## Thread control
+
+Control how many CPU threads PyTorch uses:
+
+```bash
+# Use 4 threads on CPU
+python app.py recording.mp3 --device cpu --threads 4
+
+# Use all available cores
+python app.py recording.mp3 --device cpu --threads 0
+```
+
+Default is PyTorch auto-detect. Only meaningful on CPU (GPU compute is unaffected).
+
+## Temperature
+
+Temperature controls how deterministic the transcription is:
+
+- `0.0` (default) — single deterministic pass, fastest
+- Higher values — enable fallback retries on segments with low confidence
+
+```bash
+# Use temperature fallback chain (up to 6 attempts per segment)
+python app.py recording.mp3 --temperature 0.2
+```
+
+The default `0.0` is sufficient for most recordings. Raise it if you see repeated or garbled segments.
+
 ## Combining options
 
 ```bash
-# Fast CPU transcription with timestamps
-python app.py meeting.wav --model tiny --device cpu --timestamps
+# Fast CPU transcription with 4 threads and timestamps
+python app.py meeting.wav --model tiny --device cpu --threads 4 --timestamps
 
 # High-quality Spanish transcription
 python app.py entrevista.wav --model large --language es

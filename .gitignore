@@ -3,3 +3,7 @@ voicetotext/
 
 # Generated output
 transcript.txt
+
+# Python cache
+__pycache__/
+*.pyc
