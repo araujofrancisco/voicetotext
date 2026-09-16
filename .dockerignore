@@ -1,0 +1,7 @@
+voicetotext/
+.git/
+.gitignore
+docs/
+*.md
+Dockerfile
+.dockerignore
