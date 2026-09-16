@@ -20,21 +20,14 @@ logging.basicConfig(
 )
 
 def parse_arguments() -> argparse.Namespace:
-    import torch
-    default_device = "cuda" if torch.cuda.is_available() else "cpu"
-    
     parser = argparse.ArgumentParser(description="Transcribe audio files using OpenAI's Whisper model.")
     parser.add_argument("audio_file", type=str, help="Path to the audio file.")
     parser.add_argument("--model", type=str, default="small", choices=["tiny", "base", "small", "medium", "large"],
                         help="Whisper model size. (default: small)")
     parser.add_argument("--output", type=str, default="transcript.txt", help="Output text file path.")
-    parser.add_argument("--device", type=str, default=default_device, choices=["cpu", "cuda"], 
-                        help=f"Device to run on. Auto-detected as '{default_device}'. (default: auto)")
     parser.add_argument("--language", type=str, default=None, help="Force language code (e.g., 'en', 'es').")
     parser.add_argument("--timestamps", action="store_true", 
                         help="Include [HH:MM:SS.mmm] timestamps at the start of each line.")
-    parser.add_argument("--threads", type=int, default=None,
-                        help="CPU threads for PyTorch (default: auto-detect).")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Decode temperature. 0 is deterministic; higher values enable fallback attempts. (default: 0.0)")
     return parser.parse_args()
@@ -63,19 +56,16 @@ def format_transcript(result: dict, include_timestamps: bool) -> str:
             
     return "\n".join(lines)
 
-def load_whisper_model(model_name: str, device: str, threads: int | None = None):
+def load_whisper_model(model_name: str):
     try:
         import torch
         import whisper
         
-        if threads is not None:
-            torch.set_num_threads(threads)
-        logging.info(f"Loading Whisper model '{model_name}' on {device.upper()}...")
-        model = whisper.load_model(model_name, device=device)
+        logging.info(f"Loading Whisper model '{model_name}' on cuda...")
+        model = whisper.load_model(model_name, device="cuda")
         
         gc.collect()
-        if device == "cuda":
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
             
         return model
     except ImportError as e:
@@ -114,13 +104,24 @@ def main() -> None:
         print(">>> SCRIPT EXITED (File not found) <<<")
         sys.exit(1)
 
+    import torch
+    if not torch.cuda.is_available():
+        logging.error("CUDA not available — GPU transcription required.")
+        print(">>> SCRIPT EXITED (No GPU) <<<")
+        sys.exit(1)
+
     try:
-        model = load_whisper_model(args.model, args.device, args.threads)
+        model = load_whisper_model(args.model)
         raw_result = transcribe_audio(
             model, args.audio_file, args.language,
             temperature=args.temperature,
             condition_on_previous_text=False,
         )
+        
+        # Free VRAM immediately after transcription — idle VRAM is wasted on this hardware
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
         
         # Format the output based on the --timestamps flag
         formatted_transcript = format_transcript(raw_result, args.timestamps)
