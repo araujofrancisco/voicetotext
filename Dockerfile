@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -6,9 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY app.py web_app.py .
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir openai-whisper flask "torch==2.4.1+cu121" --extra-index-url https://download.pytorch.org/whl/cu121
+COPY app.py web_app.py vram_utils.py .
 
 EXPOSE 5000
 

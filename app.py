@@ -13,6 +13,8 @@ import gc
 import faulthandler
 faulthandler.enable()
 
+import vram_utils
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(levelname)s: %(message)s",
@@ -56,13 +58,24 @@ def format_transcript(result: dict, include_timestamps: bool) -> str:
             
     return "\n".join(lines)
 
-def load_whisper_model(model_name: str):
+def load_whisper_model(model_name: str, device: str = "cuda"):
     try:
         import torch
         import whisper
         
-        logging.info(f"Loading Whisper model '{model_name}' on cuda...")
-        model = whisper.load_model(model_name, device="cuda")
+        logging.info(f"Loading Whisper model '{model_name}' on {device}...")
+
+        # Patch torch.load to avoid "weights_only" errors with newer PyTorch
+        _orig_torch_load = torch.load
+        def _patched_torch_load(*args, **kwargs):
+            kwargs["weights_only"] = False
+            return _orig_torch_load(*args, **kwargs)
+        torch.load = _patched_torch_load
+
+        try:
+            model = whisper.load_model(model_name, device=device)
+        finally:
+            torch.load = _orig_torch_load
         
         gc.collect()
         torch.cuda.empty_cache()
@@ -110,18 +123,63 @@ def main() -> None:
         print(">>> SCRIPT EXITED (No GPU) <<<")
         sys.exit(1)
 
-    try:
-        model = load_whisper_model(args.model)
-        raw_result = transcribe_audio(
-            model, args.audio_file, args.language,
-            temperature=args.temperature,
-            condition_on_previous_text=False,
+    gpu_info = vram_utils.get_gpu_info()
+    if gpu_info:
+        logging.info(f"GPUs: {vram_utils.format_gpu_info(gpu_info)}")
+    
+    gpu_idx, model_name, downgraded_from = vram_utils.find_best_gpu(args.model)
+    
+    if downgraded_from:
+        needed_vram = vram_utils.get_model_vram(downgraded_from)
+        logging.warning(
+            f"Model '{downgraded_from}' needs {vram_utils.format_vram(needed_vram)} — "
+            f"no GPU has enough; downgrading to '{model_name}'"
         )
-        
-        # Free VRAM immediately after transcription — idle VRAM is wasted on this hardware
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
+
+    try:
+        try:
+            model = load_whisper_model(model_name, device=f"cuda:{gpu_idx}")
+            
+            raw_result = transcribe_audio(
+                model, args.audio_file, args.language,
+                temperature=args.temperature,
+                condition_on_previous_text=False,
+            )
+            
+            # Free VRAM immediately after transcription — idle VRAM is wasted on this hardware
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e) or "out of memory" in str(e).lower():
+                while True:
+                    smaller = vram_utils.get_next_smaller_model(model_name)
+                    if smaller is None:
+                        raise RuntimeError(
+                            f"CUDA OOM even with 'tiny' — GPU VRAM insufficient for transcription."
+                        ) from e
+                    logging.error(
+                        f"CUDA out of memory — downgrading from '{model_name}' to '{smaller}' and retrying..."
+                    )
+                    model_name = smaller
+                    try:
+                        model = load_whisper_model(model_name, device=f"cuda:{gpu_idx}")
+                        raw_result = transcribe_audio(
+                            model, args.audio_file, args.language,
+                            temperature=args.temperature,
+                            condition_on_previous_text=False,
+                        )
+                        del model
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        break
+                    except RuntimeError as retry_e:
+                        if "CUDA out of memory" in str(retry_e) or "out of memory" in str(retry_e).lower():
+                            continue
+                        raise retry_e from e
+            else:
+                raise
         
         # Format the output based on the --timestamps flag
         formatted_transcript = format_transcript(raw_result, args.timestamps)
