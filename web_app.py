@@ -13,6 +13,8 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, render_template_string
 
+import vram_utils
+
 import faulthandler
 faulthandler.enable()
 
@@ -88,6 +90,7 @@ h1 { font-size: 1.8rem; font-weight: 600; text-align: center; margin-bottom: 0.3
 <div class="container">
 <h1>Voice to Text</h1>
 <p class="subtitle">Transcribe audio with Whisper — powered by GPU</p>
+<p class="subtitle" id="gpuInfo" style="display:none; color: #6a9f5b;"></p>
 
 <div class="card">
 <div class="drop-zone" id="dropZone">
@@ -165,6 +168,17 @@ const toast = document.getElementById('toast');
 let selectedFile = null;
 let lastTranscript = '';
 
+fetch('/gpu_info')
+  .then(r => r.json())
+  .then(data => {
+    if (data.selected) {
+      const gpuInfoEl = document.getElementById('gpuInfo');
+      gpuInfoEl.textContent = `Selected GPU: ${data.selected.name} (${(data.selected.free_bytes / 1024 / 1024 / 1024).toFixed(1)}GB free)`;
+      gpuInfoEl.style.display = 'block';
+    }
+  })
+  .catch(() => {});
+
 function formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
@@ -213,16 +227,19 @@ transcribeBtn.addEventListener('click', async () => {
   const lang = document.getElementById('languageInput').value.trim();
   if (lang) formData.append('language', lang);
 
-  try {
-    const res = await fetch('/transcribe', { method: 'POST', body: formData });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Transcription failed');
-    lastTranscript = data.transcript;
-    transcriptText.textContent = lastTranscript;
-    transcriptOutput.classList.add('visible');
-    status.className = 'status success';
-    status.textContent = `Done — ${data.segments} segments`;
-  } catch (err) {
+    try {
+      const res = await fetch('/transcribe', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Transcription failed');
+      lastTranscript = data.transcript;
+      transcriptText.textContent = lastTranscript;
+      transcriptOutput.classList.add('visible');
+      status.className = 'status success';
+      status.textContent = `Done — ${data.segments} segments`;
+      if (data.downgraded_from) {
+        showToast(`Model auto-downgraded: ${data.downgraded_from} → ${data.model_used}`);
+      }
+    } catch (err) {
     status.className = 'status error';
     status.textContent = err.message;
   } finally {
@@ -254,7 +271,19 @@ def load_whisper_model(model_name):
     import torch
     import whisper
     logging.info(f"Loading Whisper model '{model_name}' on cuda...")
-    model = whisper.load_model(model_name, device="cuda")
+
+    # Patch torch.load to avoid "weights_only" errors with newer PyTorch
+    _orig_torch_load = torch.load
+    def _patched_torch_load(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+    torch.load = _patched_torch_load
+
+    try:
+        model = whisper.load_model(model_name, device="cuda")
+    finally:
+        torch.load = _orig_torch_load
+
     gc.collect()
     torch.cuda.empty_cache()
     return model
@@ -262,7 +291,21 @@ def load_whisper_model(model_name):
 
 @app.route("/")
 def index():
+    gpu_info = vram_utils.get_gpu_info()
+    if gpu_info:
+        logging.info(f"GPU info available: {len(gpu_info)} GPU(s)")
+    else:
+        logging.warning("No GPU info available")
     return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/gpu_info")
+def gpu_info_route():
+    gpus = vram_utils.get_gpu_info()
+    selected = None
+    if gpus:
+        selected = vram_utils.find_best_gpu_from_list(gpus)
+    return jsonify(gpus=gpus, selected=selected)
 
 
 @app.route("/transcribe", methods=["POST"])
@@ -283,38 +326,80 @@ def transcribe():
     temperature = float(request.form.get("temperature", 0.0))
     language = request.form.get("language", None) or None
 
+    # Pre-flight VRAM check
+    gpus = vram_utils.get_gpu_info()
+    if gpus:
+        best_gpu = vram_utils.find_best_gpu_from_list(gpus)
+        if best_gpu:
+            required = vram_utils.MODEL_VRAM_ESTIMATES.get(model_name)
+            if required and best_gpu["free_bytes"] < required:
+                logging.warning(
+                    f"Insufficient VRAM on best GPU ({best_gpu['name']}: {best_gpu['free_bytes']/1024/1024:.0f}MB free, "
+                    f"{required/1024/1024:.0f}MB required for '{model_name}')"
+                )
+                next_model = vram_utils.get_next_smaller_model(model_name)
+                if next_model:
+                    logging.info(f"Auto-downgrading model: {model_name} -> {next_model}")
+                    model_name = next_model
+
     # Save uploaded file to temp
     ext = Path(file.filename).suffix
     tmp_path = tempfile.mktemp(suffix=ext)
     try:
         file.save(tmp_path)
 
-        model = load_whisper_model(model_name)
-        result = model.transcribe(
-            tmp_path, language=language, verbose=False,
-            temperature=temperature, condition_on_previous_text=False,
-        )
+        original_model = model_name
+        max_attempts = 3
 
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
+        for attempt in range(max_attempts):
+            try:
+                model = load_whisper_model(model_name)
+                result = model.transcribe(
+                    tmp_path, language=language, verbose=False,
+                    temperature=temperature, condition_on_previous_text=False,
+                )
 
-        # Format segments
-        lines = []
-        for seg in result["segments"]:
-            text = seg["text"].strip()
-            if not text:
-                continue
-            if include_timestamps:
-                h = int(seg["start"] // 3600)
-                m = int((seg["start"] % 3600) // 60)
-                s = int(seg["start"] % 60)
-                ms = int((seg["start"] % 1) * 1000)
-                text = f"[{h:02d}:{m:02d}:{s:02d}.{ms:03d}] {text}"
-            lines.append(text)
+                del model
+                gc.collect()
+                torch.cuda.empty_cache()
 
-        transcript = "\n".join(lines)
-        return jsonify(transcript=transcript, segments=len(lines))
+                # Format segments
+                lines = []
+                for seg in result["segments"]:
+                    text = seg["text"].strip()
+                    if not text:
+                        continue
+                    if include_timestamps:
+                        h = int(seg["start"] // 3600)
+                        m = int((seg["start"] % 3600) // 60)
+                        s = int(seg["start"] % 60)
+                        ms = int((seg["start"] % 1) * 1000)
+                        text = f"[{h:02d}:{m:02d}:{s:02d}.{ms:03d}] {text}"
+                    lines.append(text)
+
+                transcript = "\n".join(lines)
+                response = {"transcript": transcript, "segments": len(lines)}
+                if model_name != original_model:
+                    response["model_used"] = model_name
+                    response["downgraded_from"] = original_model
+                return jsonify(response)
+
+            except torch.cuda.OutOfMemoryError as e:
+                logging.warning(f"OOM on attempt {attempt + 1}: {e}")
+                if 'model' in locals():
+                    del model
+                gc.collect()
+                torch.cuda.empty_cache()
+
+                if model_name == "tiny":
+                    return jsonify(error="Out of memory — even 'tiny' model requires more VRAM than available"), 500
+
+                next_model = vram_utils.get_next_smaller_model(model_name)
+                if next_model:
+                    logging.info(f"OOM retry: {model_name} -> {next_model}")
+                    model_name = next_model
+                else:
+                    return jsonify(error="Out of memory — no smaller model available"), 500
 
     except Exception as e:
         logging.error(f"Transcription error: {e}")
